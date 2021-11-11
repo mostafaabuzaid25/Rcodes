@@ -1,0 +1,419 @@
+---
+title: "RNA-seq analysis Report"
+author: "Mostafa Abouzaid"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output: 
+   html_notebook: 
+     code_folding: hide
+     highlight: pygments
+     number_sections: yes
+     toc: yes
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Introduction  
+
+In this section we will begin the process of analysing the RNAseq in R. In the
+next section we will use DESeq2 for differential analysis. 
+```{r setup,results='hide'}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,echo = FALSE)
+library(ggrepel)
+library(cluster)
+library(ComplexHeatmap)
+library(foreach)
+library(DESeq2)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(gplots)
+library(RColorBrewer)
+library(Glimma)
+library(ggfortify)
+library(EnhancedVolcano)
+library(goseq)
+library(GO.db)
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library(qvalue)
+library(WGCNA)
+library(limma)
+library(clusterProfiler)
+library(corrplot)
+library(RColorBrewer)
+library(knitr)   #  install if needed. for showing tables with kable
+library(kableExtra)
+library(DT)
+library(cluster)
+library(ComplexHeatmap)
+library(dplyr)
+library(rrcov)
+library(reshape)
+library(FactoMineR)
+library(factoextra)
+library(openxlsx)
+library(ggraph)
+library(tidygraph)
+library(igraph)
+library(ComplexHeatmap)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+txdb=TxDb.Hsapiens.UCSC.hg38.knownGene
+options(stringsAsFactors = FALSE);
+source("DEGDeseq.R")
+verbose=0
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+seqdata = read.csv("MN.csv",row.names = 1) 
+metadata = read.csv("guid_MN.csv")
+seqdata[c(colnames(seqdata))] <- lapply(seqdata[c(colnames(seqdata))],as.integer)
+countData <- seqdata %>% as.matrix()
+meta=data.frame(sample=colnames(countData)) %>% left_join(metadata)
+ID=gsub('\\..+$', '', row.names(countData))
+annot=data.frame(row.names = rownames(countData),SYMPOL=mapIds(org.Hs.eg.db, 
+                               keys = rownames(countData),
+                               column ="SYMBOL",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")) %>% mutate(SYMPOL = ifelse(is.na(SYMPOL), rownames(countData),SYMPOL))
+
+
+```
+
+# Quality assessment {.tabset .tabset-fade .tabset-pills}
+
+## Filtering the genes
+
+For many analysis methods it is advisable to filter out as many genes as 
+possible prior to starting the analysis in order to decrease the impact on fasle
+discovery rates when applying multiple testing correction. This is normally done
+by filtering out genes with low numbers of reads, which are likely to be 
+uninformative.
+
+With `DESeq` this is not necessary as it applies a process it calls `independent
+filtering` during the analysis process. On the other hand, some filtering for 
+genes that are very lowly expressed does reduce the size of the data matrix, 
+meaning that less memory is required and processing steps are carried out 
+faster.We will keep all genes where the total number of reads across all samples is 
+greater than 5.
+
+```{r filterGenes,results='asis'}
+paste("number of genes before filtring is", dim(countData)[c(1)])
+keep <- rowSums(countData) > 5
+countData <- countData[keep,]%>% as.matrix()
+
+paste("number of genes before filtring is", dim(countData)[c(1)])
+```
+
+
+
+Before moving on to doing the actually differential expression analysis it 
+important do assess the quality of our data.
+
+## Library sizes bar plot
+
+First, we can plot how many reads we have for each sample. Whilst normalisation 
+can account for imbalance in coverage across the samples, extreme differences 
+may be indicative of underlying problems in the samples.
+
+```{r librarySizes}
+par(family="serif",face="bold", size=12)
+librarySizes <- data.frame(librarySizes=colSums(countData))
+lib=cbind(meta,librarySizes)
+ggbarplot(lib,x = "sample",
+          y="librarySizes",
+          fill = "Treatment",
+          short.panel.labs = TRUE,
+          sort.val = "desc")+facet_wrap(~Line,scales = "free") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+## Count distribution boxplots
+
+Count data is not normally distributed, so if we want to examine the
+distributions of the raw counts it is helpful to transform the data on to a log
+scale. Typically we use a `log2` transformation, however, because the data is
+count data and will contain many `0`s we need to add a count of 1 to every 
+value in order to prevent attempting `log2(0)` from creating errors.
+
+```{r logTransform}
+# Get log2 counts per million
+logcounts <- as.data.frame(rlog(countData))
+```
+
+We'll check the distribution of read counts using a boxplot and well add some
+colour to see if there is any difference between sample groups.
+
+```{r plotLogCounts, message=FALSE, warning=FALSE}
+# make a colour vector
+ 
+# Check distributions of samples using boxplots
+box=logcounts %>% melt(variable_name = "sample") %>% left_join(meta)
+
+ggboxplot(box,x="sample",y="value",
+        xlab="",
+        bxp.errorbar = TRUE,
+        notch = TRUE,
+        fill = "Treatment",
+        short.panel.labs = TRUE,
+        ylab="Log2(Counts)")+facet_wrap(~Line,scales = "free") + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+
+
+```
+```{r}
+ggdensity(box,
+       y = "..density..",
+       x="value",
+       combine = TRUE,                  # Combine the 3 plots
+       xlab = "Expression", 
+       add = "median",                  # Add median line. 
+       rug = TRUE,                      # Add marginal rug
+       color = "Treatment"
+)+facet_wrap(~Line,scales = "free")
+```
+
+
+From the boxplots we see that overall the density distributions of raw
+log-intensities are not identical but still not very different. If a sample is
+really far above or below the blue horizontal line we may need to investigate
+that sample further.
+
+
+
+## Principle Component Analysis
+
+A principle components analysis (PCA) is an example of an unsupervised analysis,
+where we don't specify the grouping of the samples. If your experiment is well
+controlled and has worked well, we should that replicate samples cluster 
+closely, whilst the greatest sources of variation in the data should be between
+treatments/sample groups. It is also an incredibly useful tool for checking for 
+outliers and batch effects.
+
+To run the PCA we should first normalise our data for library size and transform
+to a log scale.DESeq2 provides two commands that can be used to do this, here we
+will use the command `rlog`. `rlog` performs a log2 scale transformation in a 
+way that compensates for differences between samples for genes with low read 
+count and also normalizes between samples for library size. 
+
+You can read more about `rlog`, it's alternative `vst` and the comparison
+between the two 
+[here](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#count-data-transformations). 
+
+To plot the PCA results we will use the `autoplot` function from the `ggfortify`
+package [@Tang2016]. `ggfortify` is built on top of `ggplot2` and is able to 
+recognise common statistical objects such as PCA results or linear model results 
+and automatically generate summary plot of the results in an appropriate manner.
+
+```{r pcaPlot, fig.align="center", fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+
+# run PCA
+PCA <- prcomp(t(logcounts), graph = FALSE)
+
+autoplot(PCA,
+         data = metadata, 
+         colour="Treatment", 
+         shape="Line",
+         frame = TRUE, 
+         frame.type = 'norm',
+         frame.colour = "Treatment",
+         size=5)+ facet_wrap(~Line,scales = "free")+theme_minimal()
+```
+
+Replicate samples from the same group cluster together in the plot, while 
+samples from different groups form separate clusters. This indicates that the
+differences between groups are larger than those within groups.
+Clustering in the PCA plot can be used to motivate changes to the design
+matrix in light of potential batch effects. For example, imagine that the
+first replicate of each group was prepared at a separate time from the second
+replicate. 
+
+
+
+
+## Hierarchical clustering with heatmaps
+
+An alternative to PCA plots for examining relationships between samples is
+using hierarchical clustering. Heatmaps are a nice visualisation to examine
+hierarchical clustering of your samples. We can do this using the `heatmap.2`
+function from the *gplots* package. In this example `heatmap.2` calculates a
+matrix of euclidean distances from the `logcounts` object.
+
+The *RColorBrewer* package has nicer colour schemes, accessed using the
+`brewer.pal` function. "RdYlBu" is a common choice, and "Spectral" is also
+nice.
+
+Note:The `png` function will create a png file to save the plots created
+straight after, and will close this file when `dev.off()` is called. To see
+your plots interactively, simply omit those two lines.
+
+We don't want to plot a heatmap of all 22013 genes, so let's select data for the 
+500 most variable genes and plot the heatmap.
+
+
+
+```{r plotHM, fig.height=10, fig.width=10, message=FALSE}
+# We estimate the variance for each row in the logcounts matrix
+countVar <- apply(logcounts, 1, var)
+# Get the row numbers for the top 500 most variable genes
+highVar <- order(countVar, decreasing=TRUE)[1:500]
+# Subset logcounts matrix
+hmDat <- scale(as.matrix(logcounts[highVar,]),center =TRUE )
+
+
+Heatmap(hmDat,name="Expression",show_row_names = FALSE,column_split=meta$Line,top_annotation = columnAnnotation(Treatment=meta$Treatment),km = 2,cluster_columns = FALSE)
+```
+
+# Differential gene expression {.tabset .tabset-fade .tabset-pills}
+
+```{r makeDDSObj, message=FALSE, warning=FALSE}
+
+# create the design formula
+dds <- DEG.DESeq2(countData,selectedComparisons = c("CKDHT-CKNDHT","ADHT-ANDHT"),sampleInfo = meta,groups = meta$groups)
+dds$comparisons
+writeDEGxlsx()
+MAfigcap=paste("MA plot showing the relationship between average concentration (normalized counts) and fold-change (logFC) across the genes. Each gene is represented by a grey dot. Significant differentially expressed upregulated genes are colored in red while Significant differentially expressed down regulated genes are colored in blue.  The doted lines represent logFC +/− 2 threshold. ")
+volcanofigcap=paste("Volcano Plot for differential gene expression. Scattered points represent genes: the x-axis is the fold change for the ratio,whereas the y-axis is the -statistic or Log Odds, where is the probability that a gene has statistical significance in its differential expression. Red dots are thus genes significantly.differentially expressed")
+GOcap=paste("GO functional analysis of DEGs. GO enrichment analysis of DEGs was retrieved using GOseq. The 10 most significantly (P<0.01) enriched GO terms in biological process, molecular function and cellular component branches are presented. All the adjusted statistically significant values of the terms were negative 10-base log transformed.")
+```
+
+
+## MA-Plot {.tabset .tabset-fade .tabset-pills}
+
+```{r echo=FALSE, fig.height=5, fig.width=5, message=FALSE, warning=FALSE, results='asis'}
+
+sink(tempfile())
+MAplots <- foreach(i = dds$comparisons) %do% 
+Ma(contrast = i,fdr = 0.01,fc = 2)
+sink()
+
+headings <- paste(dds$comparisons)
+for (i in 1:length(MAplots)) {
+  cat("### ",headings[i],"\n")
+  print(MAplots[[i]])
+  plot.new()
+  print(paste("Figure",i,":",MAfigcap,sep = ""))
+  dev.off()
+  cat('\n\n')
+}
+
+
+```
+
+
+
+## Volcano-plot {.tabset .tabset-fade .tabset-pills}
+
+```{r echo=FALSE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+sink(tempfile())
+Volcanoplots <- foreach(i = dds$comparisons)%do% VOL(contrast = i) 
+sink()
+
+headings <- paste(dds$comparisons)
+
+for (i in 1:length(Volcanoplots)) {
+  cat("### ",headings[i],"\n")
+  print(Volcanoplots[[i]])
+  plot.new()
+  print(paste("Figure",i,":",volcanofigcap,sep = ""))
+  dev.off()
+  cat('\n\n')
+
+}
+
+```
+
+## Go-Analysis {.tabset .tabset-fade .tabset-pills}
+
+
+```{r echo=FALSE, fig.height=15, fig.width=10, message=FALSE, warning=FALSE, results='asis'}
+DEG=list()
+DEG2=list()
+for (i in dds$comparisons) {
+    DEG[[i]]=data.frame(read.xlsx("DEG_0.01.xlsx",sheet = i ))
+   
+}
+
+DEG[["diff"]]=data.frame(ID=setdiff(DEG$`ADHT-ANDHT`$ID,DEG$`CKDHT-CKNDHT`$ID))
+genes=lapply(DEG, function(i) mapIds(org.Hs.eg.db, 
+                               keys =as.data.frame(i)$ID,
+                               column ="ENTREZID",
+                               keytype = "ENSEMBL",
+                               multiVals = "first"))
+DT::datatable(DEG$diff)
+compKEGG=compareCluster(geneCluster=genes,
+                         fun="enrichKEGG",
+                         pvalueCutoff=0.05,
+                         pAdjustMethod="BH")
+
+compGO=compareCluster(geneCluster=genes,
+                         fun= "enrichGO",
+                         OrgDb="org.Hs.eg.db",
+                         ont="BP",
+                         pvalueCutoff=0.05,
+                         pAdjustMethod="BH")
+
+compDGN=compareCluster(geneCluster=genes,
+                       fun="enrichDGN",
+                       pvalueCutoff=0.05,
+                       pAdjustMethod="BH")
+```
+
+```{r fig.height=8, fig.width=10}
+dotplot(compGO, showCategory = 15, title = "GO Enrichment Analysis")
+```
+```{r}
+DT::datatable(compGO@compareClusterResult)
+```
+## KEGG Pathway Enrichment Analysis
+```{r message=FALSE, paged.print=FALSE}
+
+dotplot(compKEGG, showCategory = 15, title = "KEGG Pathway Enrichment Analysis")
+```
+```{r}
+DT::datatable(compKEGG@compareClusterResult)
+```
+
+## Disease Ontology Semantic and Enrichment analysis
+
+Large sets of candidate genes derived from high-throughput biological experiments can be
+characterized by functional enrichment analysis. The analysis consists of comparing the functions of one gene set against that of a background gene set. Then, functions related to a signiﬁcant number of genes in the
+gene set are expected to be relevant.
+
+```{r fig.height=8, fig.width=10, warning=FALSE}
+dotplot(compDGN, showCategory = 15, title = "DGN Enrichment Analysis")
+```
+```{r}
+DT::datatable(compDGN@compareClusterResult)
+```
+
+## Downloads
+
+[DEG Results](DEG.xlsx) \n
+
+[GO seq Results](Goseq.xlsx)
+
+
+# Chipseq {.tabset .tabset-fade .tabset-pills}
+
+
+--------------------
+
+# References
+
+
+Huber, Wolfgang. 2010. “Differential Expression Analysis for Sequence Count Data” 11 (March).
+
+Kim, Daehwan, Ben Langmead, and Steven L. Salzberg. 2015. “HISAT: A Fast Spliced Aligner with Low Memory Requirements.” Nature Methods 12 (March). Nature Publishing Group, a division of Macmillan Publishers Limited. All Rights Reserved. SN -: 357 EP. http://dx.doi.org/10.1038/nmeth.3317.
+
+Liao, Yang, Gordon K Smyth, and Wei Shi. 2014. “featureCounts: an efficient general purpose program for assigning sequence reads to genomic features.” Bioinformatics (Oxford, England) 30 (7): 923–30. doi:10.1093/bioinformatics/btt656.
+
+Tang, Yuan, Masaaki Horikoshi, and Wenxuan Li. 2016. “Ggfortify: Unified Interface to Visualize Statistical Result of Popular R Packages.” The R Journal 8 (2). https://journal.r-project.org/.
+
+Wickham, Hadley, Romain François, Lionel Henry, and Kirill Müller. 2018. Dplyr: A Grammar of Data Manipulation. https://CRAN.R-project.org/package=dplyr.
+
+
+
+
+

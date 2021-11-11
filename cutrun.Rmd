@@ -1,0 +1,320 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(karyoploteR)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(BiocManager)
+library(genomation)
+library(SummarizedExperiment)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(viridis)
+library(GenomicRanges)
+#library(chromVAR)
+library(DESeq2)
+library(ggpubr)
+library(corrplot) 
+```
+
+```{r}
+##=== R command ===## 
+## Path to the project and histone list
+projPath = ""
+sampleList = c("K27me3_rep1", "K27me3_rep2", "K4me3_rep1", "K4me3_rep2", "IgG_rep1", "IgG_rep2")
+histList = c("K27me3", "K4me3", "IgG")
+
+## Collect the alignment results from the bowtie2 alignment summary files
+alignResult = c()
+for(hist in sampleList){
+                        alignRes = read.table(
+                        paste0(projPath, 
+                        "/alignment/sam/bowtie2_summary/", 
+                        hist, "_bowtie2.txt"), 
+                        header = FALSE, fill = TRUE)
+
+alignRate = substr(alignRes$V1[6], 1, nchar(as.character(alignRes$V1[6]))-1)
+histInfo = strsplit(hist, "_")[[1]]
+alignResult = data.frame(Histone = histInfo[1], Replicate = histInfo[2], 
+                           SequencingDepth = alignRes$V1[1] %>% as.character %>% as.numeric, 
+                           MappedFragNum = alignRes$V1[4] %>% as.character %>% as.numeric + alignRes$V1[5] %>% as.character %>% as.numeric,AlignmentRate = alignRate %>% as.numeric)  %>% rbind(alignResult, .)
+}
+alignResult$Histone = factor(alignResult$Histone, levels = histList)
+alignResult %>% mutate(AlignmentRate = paste0(AlignmentRate, "%"))
+```
+
+```{r}
+spikeAlign = c()
+for(hist in sampleList){
+  spikeRes = read.table(paste0(projPath, "/alignment/sam/bowtie2_summary/", hist, "_bowtie2_spikeIn.txt"), header = FALSE, fill = TRUE)
+  alignRate = substr(spikeRes$V1[6], 1, nchar(as.character(spikeRes$V1[6]))-1)
+  histInfo = strsplit(hist, "_")[[1]]
+  spikeAlign = data.frame(Histone = histInfo[1], Replicate = histInfo[2], 
+                          SequencingDepth = spikeRes$V1[1] %>% as.character %>% as.numeric, 
+                          MappedFragNum_spikeIn = spikeRes$V1[4] %>% as.character %>% as.numeric + spikeRes$V1[5] %>% as.character %>% as.numeric, 
+                          AlignmentRate_spikeIn = alignRate %>% as.numeric)  %>% rbind(spikeAlign, .)
+}
+spikeAlign$Histone = factor(spikeAlign$Histone, levels = histList)
+spikeAlign %>% mutate(AlignmentRate_spikeIn = paste0(AlignmentRate_spikeIn, "%"))
+```
+```{r}
+alignSummary = left_join(alignResult, spikeAlign, by = c("Histone", "Replicate", "SequencingDepth")) %>%
+  mutate(AlignmentRate_hg38 = paste0(AlignmentRate_hg38, "%"), 
+         AlignmentRate_spikeIn = paste0(AlignmentRate_spikeIn, "%"))
+alignSummary
+```
+
+```{r}
+##=== R command ===## 
+## Generate sequencing depth boxplot
+fig3A = alignResult %>% ggplot(aes(x = Histone, y = SequencingDepth/1000000, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("Sequencing Depth per Million") +
+    xlab("") + 
+    ggtitle("A. Sequencing Depth")
+
+fig3B = alignResult %>% ggplot(aes(x = Histone, y = MappedFragNum_hg38/1000000, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("Mapped Fragments per Million") +
+    xlab("") +
+    ggtitle("B. Alignable Fragment (hg38)")
+
+fig3C = alignResult %>% ggplot(aes(x = Histone, y = AlignmentRate_hg38, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("% of Mapped Fragments") +
+    xlab("") +
+    ggtitle("C. Alignment Rate (hg38)")
+
+fig3D = spikeAlign %>% ggplot(aes(x = Histone, y = AlignmentRate_spikeIn, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("Spike-in Alignment Rate") +
+    xlab("") +
+    ggtitle("D. Alignment Rate (E.coli)")
+
+ggarrange(fig3A, fig3B, fig3C, fig3D, ncol = 2, nrow=2, common.legend = TRUE, legend="bottom")
+```
+
+
+```{r}
+dupResult = c()
+for(hist in sampleList){
+  dupRes = read.table(paste0(projPath, "/alignment/removeDuplicate/picard_summary/", hist, "_picard.rmDup.txt"), header = TRUE, fill = TRUE)
+  
+  histInfo = strsplit(hist, "_")[[1]]
+  dupResult = data.frame(Histone = histInfo[1], Replicate = histInfo[2], MappedFragNum_hg38 = dupRes$READ_PAIRS_EXAMINED[1] %>% as.character %>% as.numeric, DuplicationRate = dupRes$PERCENT_DUPLICATION[1] %>% as.character %>% as.numeric * 100, EstimatedLibrarySize = dupRes$ESTIMATED_LIBRARY_SIZE[1] %>% as.character %>% as.numeric) %>% mutate(UniqueFragNum = MappedFragNum_hg38 * (1-DuplicationRate/100))  %>% rbind(dupResult, .)
+}
+dupResult$Histone = factor(dupResult$Histone, levels = histList)
+alignDupSummary = left_join(alignSummary, dupResult, by = c("Histone", "Replicate", "MappedFragNum_hg38")) %>% mutate(DuplicationRate = paste0(DuplicationRate, "%"))
+alignDupSummary
+```
+```{r}
+##=== R command ===## 
+## generate boxplot figure for the  duplication rate
+fig4A = dupResult %>% ggplot(aes(x = Histone, y = DuplicationRate, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("Duplication Rate (*100%)") +
+    xlab("") 
+
+fig4B = dupResult %>% ggplot(aes(x = Histone, y = EstimatedLibrarySize, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("Estimated Library Size") +
+    xlab("") 
+
+fig4C = dupResult %>% ggplot(aes(x = Histone, y = UniqueFragNum, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("# of Unique Fragments") +
+    xlab("")
+
+ggarrange(fig4A, fig4B, fig4C, ncol = 3, common.legend = TRUE, legend="bottom")
+```
+
+```{r}
+fragLen = c()
+for(hist in sampleList){
+  
+  histInfo = strsplit(hist, "_")[[1]]
+  fragLen = read.table(paste0(projPath, "/alignment/sam/fragmentLen/", hist, "_fragmentLen.txt"), header = FALSE) %>% mutate(fragLen = V1 %>% as.numeric, fragCount = V2 %>% as.numeric, Weight = as.numeric(V2)/sum(as.numeric(V2)), Histone = histInfo[1], Replicate = histInfo[2], sampleInfo = hist) %>% rbind(fragLen, .) 
+}
+fragLen$sampleInfo = factor(fragLen$sampleInfo, levels = sampleList)
+fragLen$Histone = factor(fragLen$Histone, levels = histList)
+## Generate the fragment size density plot (violin plot)
+fig5A = fragLen %>% ggplot(aes(x = sampleInfo, y = fragLen, weight = Weight, fill = Histone)) +
+    geom_violin(bw = 5) +
+    scale_y_continuous(breaks = seq(0, 800, 50)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 20) +
+    ggpubr::rotate_x_text(angle = 20) +
+    ylab("Fragment Length") +
+    xlab("")
+
+fig5B = fragLen %>% ggplot(aes(x = fragLen, y = fragCount, color = Histone, group = sampleInfo, linetype = Replicate)) +
+  geom_line(size = 1) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma") +
+  theme_bw(base_size = 20) +
+  xlab("Fragment Length") +
+  ylab("Count") +
+  coord_cartesian(xlim = c(0, 500))
+
+ggarrange(fig5A, fig5B, ncol = 2)
+```
+```{r}
+peakN = c()
+peakWidth = c()
+peakType = c("control", "top0.01")
+for(hist in sampleList){
+  histInfo = strsplit(hist, "_")[[1]]
+  if(histInfo[1] != "IgG"){
+    for(type in peakType){
+      peakInfo = read.table(paste0(projPath, "/peakCalling/SEACR/", hist, "_seacr_", type, ".peaks.stringent.bed"), header = FALSE, fill = TRUE)  %>% mutate(width = abs(V3-V2))
+      peakN = data.frame(peakN = nrow(peakInfo), peakType = type, Histone = histInfo[1], Replicate = histInfo[2]) %>% rbind(peakN, .)
+      peakWidth = data.frame(width = peakInfo$width, peakType = type, Histone = histInfo[1], Replicate = histInfo[2])  %>% rbind(peakWidth, .)
+    }
+  }
+}
+peakN %>% select(Histone, Replicate, peakType, peakN)
+```
+
+
+```{r}
+##=== R command ===## 
+histL = c("K27me3", "K4me3")
+repL = paste0("rep", 1:2)
+peakType = c("control", "top0.01")
+peakOverlap = c()
+for(type in peakType){
+  for(hist in histL){
+    overlap.gr = GRanges()
+    for(rep in repL){
+      peakInfo = read.table(paste0(projPath, "/peakCalling/SEACR/", hist, "_", rep, "_seacr_", type, ".peaks.stringent.bed"), header = FALSE, fill = TRUE)
+      peakInfo.gr = GRanges(peakInfo$V1, IRanges(start = peakInfo$V2, end = peakInfo$V3), strand = "*")
+      if(length(overlap.gr) >0){
+        overlap.gr = overlap.gr[findOverlaps(overlap.gr, peakInfo.gr)@from]
+      }else{
+        overlap.gr = peakInfo.gr
+        
+      }
+    }
+    peakOverlap = data.frame(peakReprod = length(overlap.gr), Histone = hist, peakType = type) %>% rbind(peakOverlap, .)
+  }
+}
+
+peakReprod = left_join(peakN, peakOverlap, by = c("Histone", "peakType")) %>% mutate(peakReprodRate = peakReprod/peakN * 100)
+peakReprod %>% select(Histone, Replicate, peakType, peakN, peakReprodNum = peakReprod, peakReprodRate)
+```
+
+
+
+```{r fig.height=10}
+library(karyoploteR)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(BiocManager)
+library(genomation)
+regions=import.bedGraph("CLP1_293T_S2_treat_integer.bdg")
+kp <- plotKaryotype(genome = "hg19")
+kpAddBaseNumbers(kp,cex=0.9,add.units = TRUE,digits = 2)
+kp <- plotKaryotype(zoom = region, 
+                    cex=3, 
+                    plot.params = pp)
+kpPlotDensity(kp, data=regions,col="blue")
+
+
+```
+
+
+```{r fig.height=7, fig.width=15, message=FALSE, warning=FALSE}
+
+genome=TxDb.Hsapiens.UCSC.hg19.knownGene
+region <- toGRanges("chr1:121,143,606-121,800,113")
+pp <- getDefaultPlotParams(plot.type=1)
+pp$leftmargin <- 0.15
+pp$topmargin <- 15
+pp$bottommargin <- 15
+pp$ideogramheight <- 5
+pp$data1inmargin <- 10
+pp$data1outmargin <- 0
+
+marks <- c(seacr="CLP1_293T_S2_treat_integer.bdg",macs2="CLP1_293T_S2_treat_integer.bdg")
+kp <- plotKaryotype(zoom = region, 
+                    cex=3, 
+                    plot.params = pp)
+
+kpAddBaseNumbers(kp,tick.dist = 100000, minor.tick.dist = 2000,
+                 add.units = TRUE, 
+                 cex=2)
+kpAddMainTitle(kp, "CUT&RUN", cex=4)
+genes.data <- makeGenesDataFromTxDb(genome,
+                                    karyoplot=kp,
+                                    plot.transcripts = TRUE,
+                                    plot.transcripts.structure = TRUE)
+genes.data <- addGeneNames(genes.data)
+genes.data <- mergeTranscripts(genes.data)
+
+kpPlotGenes(kp, 
+            data=genes.data, 
+            r0=0, 
+            r1=0.1, 
+            gene.name.cex = 2.5,add.gene.names = TRUE)
+
+
+#marks
+total.tracks <- length(marks)
+out.at <- autotrack(1:length(marks), total.tracks, margin = 0.3, r0=0.23)
+kpAddLabels(kp, labels = "CLP", r0 = out.at$r0, r1=out.at$r1, cex=3.5,
+            srt=90, pos=1, label.margin = 0.14)
+
+for(i in seq_len(length(marks))) {
+  bigwig.file <- import.bedGraph(marks[i])
+  at <- autotrack(i, length(marks), r0=out.at$r0, r1=out.at$r1, margin = 0.1)
+  kp <- kpPlotDensity(kp, data=bigwig.file, 
+                          #ymax="visible.region",
+                          r0=at$r0, r1=at$r1, 
+                          col = "cadetblue2")
+  #computed.ymax <- ceiling(kp$latest.plot$computed.values$ymax)
+  #kpAxis(kp, ymin=0, ymax=computed.ymax, tick.pos = computed.ymax,r0=at$r0, r1=at$r1, cex=1.6)
+  kpAddLabels(kp, 
+              labels = names(marks)[i], 
+              r0=at$r0, r1=at$r1, 
+              cex=2.2, 
+              label.margin = 0.035)
+}
+
+
+
+
+```
+
+
+
